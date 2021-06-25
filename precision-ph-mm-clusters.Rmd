@@ -1,0 +1,533 @@
+---
+title: "Precision public health: creating GP multimorbidity clusters"
+subtitle: "Exploratory analysis using unsupervised machine learning"
+date: "`r Sys.Date()`"
+author: "Julian Flowers"
+affiliation: "Public Health England"
+output: html_notebook
+---
+
+```{r setup, include  = FALSE}
+knitr::opts_chunk$set(cache = TRUE, message = FALSE, echo = FALSE, warning = FALSE)
+if (!require("phecharts")) devtools::install_git('https://gitlab.phe.gov.uk/packages/phecharts')
+
+
+library(pacman)
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+   # install.packages("BiocManager")
+#BiocManager::install("ComplexHeatmap", version = "3.8")
+p_load(fingertipsR, fingertipscharts, rgisws, tidyverse, NbClust, factoextra, FactoMineR, skimr, naniar, phecharts,  cluster)
+theme_set(theme_phe())
+
+
+```
+
+
+
+# Motivation
+
+* Increasing importance of MM - costs, inequality, increasing prevalence
+* Limited datasets
+* Prevalence estimates at practice level from QOF at practice level and over time
+* Use unsupervised machine learning to look at association between variables = prevalence, deprivation, sociodemography?
+
+## Approach
+
+1. Identify and extract relevant variables from Fingertips via `fingertipsR`
+2. Preprocess - missing data, convert to wide format, scale
+3. Hierarchical clustering and kmeans
+4. Statistical tests to confirm cluster numbers
+5. Calculate summary statistics for each cluster
+6. Assign practices to clusters
+7. Map
+8. Other...?
+
+![](Preview.jpg)
+
+
+## Getting data from Fingertips
+
+We'll use the practice profiles and other profiles with GP data (e.g. diabetes):
+
+* Get ProfileID for the profile
+* Get AreaTypeID for GPs
+* Identify indicators available for GP IndicatorTypeID
+* Filter relevant indicators
+* Extract data
+
+### Getting IndicatorIDs
+
+```{r}
+
+## Profiles
+prof <- profiles() ## 20
+areas <- area_types() ## 7
+
+inds <- indicator_areatypes() %>%
+  filter(AreaTypeID == 7)
+
+inds1 <- indicators()
+
+inds2 <- inds %>%
+  left_join(inds1) %>%
+  select(IndicatorID:IndicatorName) 
+
+head(inds2)
+
+
+```
+
+(Note, indicator names for identical indicators vary across Fingertips data)
+
+### Filtering on indicator names
+
+For this analysis we are interested in extracting prevalence estimates, deprivation scores and demographic variables (prevalence estimates are not age-adjusted)
+
+```{r}
+
+
+ids <- inds2 %>%
+  filter(str_detect(IndicatorName, "prevalence|[Dd]epri|long-term|nursing|aged")) %>%
+  pull(IndicatorID) %>%
+  unique()
+
+
+
+```
+
+We have a list of 40 indicator IDs for which we will extract data
+
+###  Data extraction
+
+We can now extract the data (NB takes a few minutes)
+
+```{r}
+
+data <- fingertips_data(IndicatorID = ids, AreaTypeID = 7)
+
+data %>% write_rds("gp_cluster_data.rds", compress = "gz")
+
+```
+
+
+### Summary
+
+What have we got:
+
+* A data set with `r nrow(data)` rows and `r ncol(data)` columns
+* A data set with `r length(unique(data$IndicatorID))` unique indicators
+* A data set with these variables `r data$IndicatorName %>% unique()`
+
+### Cleaning
+
+* We'll remove the retired indicators
+
+```{r}
+
+data <- read_rds("gp_cluster_data.rds")
+
+data <- data %>%
+  filter(!str_detect(IndicatorName, "retired"))
+
+
+```
+
+* select latest data
+
+```{r}
+
+latest_data <- data %>%
+  filter(AreaType == "GP") %>%
+  group_by(IndicatorID, Age, Sex) %>%
+  filter(TimeperiodSortable == max(TimeperiodSortable))
+
+## visualise
+
+
+latest_data %>%
+  filter(AreaType == "GP") %>%
+  ggplot(aes(fct_rev(IndicatorName), Timeperiod), fill = "red") +
+  geom_tile() +
+  coord_flip() +
+  labs(title = "Latest period for each indicator", 
+       y = "", 
+       x = "") +
+  theme(axis.text = element_text(size = rel(.7)))
+  
+```
+
+
+
+
+* Check for and impute missing data
+
+```{r}
+
+latest_data <- latest_data %>%
+  filter(AreaType == "GP") %>%
+  select(IndicatorID, IndicatorName, AreaName, AreaCode, AreaType,  Timeperiod, Value)
+
+latest_data_imputed <- latest_data %>%
+  filter(AreaType == "GP") %>%
+  group_by(IndicatorID, Timeperiod) %>%
+  mutate(Value = ifelse(is.na(Value), median(Value, na.rm = TRUE), Value)) 
+
+
+```
+
+* Convert to wide and scale
+
+```{r}
+
+scaled <- latest_data_imputed %>%
+  ungroup() %>%
+  mutate(index = paste(IndicatorName, Timeperiod)) %>%
+  select(index, Value, AreaName, AreaCode) %>%
+  spread(index, Value) %>%
+  mutate_if(is.numeric, function(x) ifelse(is.na(x), median(x, na.rm = TRUE), x)) %>%
+  mutate_if(is.numeric, scale)
+
+scaled
+
+
+
+```
+
+Now have `r ncol(scaled) -2`  variables for `r nrow(scaled)` GP practices.
+
+
+## Correlation matrix
+
+Can look at the relationship between variables
+
+```{r fig.height=10, fig.width=10}
+
+scaled[, -c(1:2)] %>%
+  cor() %>%
+  corrplot::corrplot(tl.cex = .5, tl.col = "black", order = "hclust", method = "ellipse", addrect = 6)
+
+```
+
+
+
+```{r, eval = FALSE}
+
+ComplexHeatmap::Heatmap(scaled)
+
+```
+
+
+
+```{r, eval=FALSE}
+
+fviz_nbclust(scaled[, -c(1:2)], kmeans, k.max = 10, method =  "wss") 
+
+
+```
+
+
+
+```{r, eval = FALSE}
+
+hc <- hcut(scaled[, -c(1:2)])
+
+p1 <- fviz_dend(hc, show_labels = FALSE, rect = TRUE)
+p2 <- fviz_cluster(hc, ellipse.type = "convex")
+
+cowplot::plot_grid(p1, p2)
+
+```
+
+## Cluster analysis
+
+* Use [pam](https://en.wikibooks.org/wiki/Data_Mining_Algorithms_In_R/Clustering/Partitioning_Around_Medoids_(PAM)) (partition around mediods) model 
+
+```{r}
+
+set.seed(42)
+k <- 10
+
+rownames(scaled) <- scaled$AreaCode
+
+km <- pam(scaled[, -c(1:2)], k = k)
+
+e <- fviz_cluster(km, scaled[, -c(1:2)], ellipse = TRUE, ellipse.type = "convex", ellipse.level = .95, labelsize = 6, palette = viridis::viridis(10))
+
+e
+
+scaled_cluster <- data.frame(cluster = km$cluster, scaled)
+scale_means <- data.frame(km$centers) %>% rownames_to_column("cluster")
+
+```
+
+## Cluster summaries
+
+```{r fig.height=16, fig.width=12}
+
+options(digits = 3)
+
+cluster_size <- km$clusinfo[,1]
+
+
+
+km_med <- km$medoids %>%
+  data.frame() %>%
+  mutate(cluster = 1:10) %>%
+  select(cluster, everything()) %>%
+  gather(metric, value, 2:ncol(.)) %>%
+  mutate(category = case_when(str_detect(metric, "X..aged") ~ "demography", 
+                              str_detect(metric, "[Dd]epr") & !str_detect(metric, "[Dd]epress") ~ "deprivation", 
+                              str_detect(metric, "smok|Obesi") ~ "risk_factors", 
+                              str_detect(metric, "[Dd]iabetes") ~ "diabetes", 
+                              str_detect(metric, "CHD|Dementia|Heart|BP|[Ss]troke|PAD|[Hh]yper") ~ "cvd", 
+                              str_detect(metric, "[Dd]epress|[Mm]ental") ~ "mental_health", 
+                              str_detect(metric, "MSK|Arth|Osteo") ~ "msk", 
+                              str_detect(metric, "COPD|Asthma") ~ "resp_disease", 
+                              TRUE ~ "prevalence")) %>%
+  filter(!str_detect(metric, "under.18"))
+  
+  
+km1 <- km_med %>%
+  filter(category == "demography") %>%
+  ggplot(aes(fct_rev(metric), factor(cluster), fill = value)) +
+  geom_tile( colour = "grey") + 
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  facet_wrap(~category) +
+  theme(axis.text.y = element_text(size = rel(.8)))
+
+km2 <- km_med %>%
+  filter(category == "deprivation") %>%
+  ggplot(aes(fct_rev(metric), factor(cluster), fill = value)) +
+  geom_tile(colour = "grey") + 
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  facet_wrap(~category) +
+  theme(axis.text.y = element_text(size = rel(.8)))
+
+km3 <- km_med %>%
+  filter(category == "risk_factors") %>%
+  ggplot(aes(metric, factor(cluster), fill = value)) +
+  geom_tile(colour = "grey") + 
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  facet_wrap(~category) +
+  theme(axis.text.y = element_text(size = rel(.8)))
+
+km4 <- km_med %>%
+  filter(category == "diabetes") %>%
+  ggplot(aes(metric, factor(cluster), fill = value)) +
+  geom_tile(colour = "grey") + 
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  facet_wrap(~category) +
+  theme(axis.text.y = element_text(size = rel(.8)))
+
+km5 <- km_med %>%
+  filter(category == "cvd") %>%
+  ggplot(aes(metric, factor(cluster), fill = value)) +
+  geom_tile(colour = "grey") + 
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  facet_wrap(~category) +
+  theme(axis.text.y = element_text(size = rel(.8)))
+
+
+km6 <- km_med %>%
+  filter(category == "prevalence") %>%
+  ggplot(aes(metric, factor(cluster), fill = value)) +
+  geom_tile(colour = "grey") + 
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  facet_wrap(~category) +
+  theme(axis.text.y = element_text(size = rel(.8)))
+
+km7 <- km_med %>%
+  filter(category == "mental_health") %>%
+  ggplot(aes(metric, factor(cluster), fill = value)) +
+  geom_tile(colour = "grey") + 
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  facet_wrap(~category) +
+  theme(axis.text.y = element_text(size = rel(.8)))
+
+km8 <- km_med %>%
+  filter(category == "msk") %>%
+  ggplot(aes(metric, factor(cluster), fill = value)) +
+  geom_tile(colour = "grey") + 
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  facet_wrap(~category) +
+  theme(axis.text.y = element_text(size = rel(.8)))
+
+km9 <- km_med %>%
+  filter(category == "resp_disease") %>%
+  ggplot(aes(metric, factor(cluster), fill = value)) +
+  geom_tile(colour = "grey") + 
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  facet_wrap(~category) +
+  theme(axis.text.y = element_text(size = rel(.8)))
+
+
+cowplot::plot_grid(km1, km2, km3, km4, km5, km6, km7, km8, km9,   ncol = 1, align = "v", rel_heights = 2, axis = "l")
+
+
+```
+
+
+
+```{r}
+
+latest_data_wide <- latest_data_imputed %>%
+  ungroup() %>%
+  mutate(index = paste(IndicatorName, Timeperiod)) %>%
+  select(index, Value, AreaName, AreaCode) %>%
+  spread(index, Value) %>%
+  mutate_if(is.numeric, function(x) ifelse(is.na(x), median(x, na.rm = TRUE), x))
+
+gp_clusters <- data.frame(latest_data_wide, cluster = km$clustering)
+
+gp_clusters %>%
+  filter(cluster %in% c(2,9)) %>%
+  gather(metric, value, 3:59)  %>%
+  group_by(cluster, metric) %>%
+  summarise(value = list(value)) %>%
+  spread(cluster, value) %>%
+  group_by(metric) %>%
+  mutate(p_value = t.test(unlist(`2`), unlist(`9`))$p.value, 
+          t_value = t.test(unlist(`2`), unlist(`9`))$statistic, 
+         mean_diff = mean(unlist(`2`), na.rm = TRUE)/ mean(unlist(`9`), na.rm = TRUE)) %>%
+  filter(p_value < 0.001) %>%
+  arrange(-mean_diff) %>%
+  select(metric, mean_diff) %>%
+  ggplot(aes(metric, mean_diff)) +
+  geom_col() +
+  coord_flip()
+
+  
+
+```
+
+
+
+
+## Geography of practice clusters
+
+```{r}
+
+
+## practice postcodes
+practice_details <- read_csv("C:/Users/julian.flowers/Downloads/gp_codes.csv")
+
+## practice geocodes
+
+
+```
+
+
+```{r}
+
+gp_clusters <- gp_clusters %>%
+  left_join(practice_geocode, by = c("AreaCode" = "OrgId")) 
+
+gp_clus <- gp_clusters 
+
+```
+
+```{r fig.height=12, fig.width=8}
+library(ggmap)
+
+ggmap::register_google(key = "AIzaSyCD1fmTpS5ep66wLzdy5amz-eIDkZLfLH4")
+
+
+geo <- practice_details %>%
+  mutate(geo = purrr::map(PostCode, ~(geocode(.x))))
+
+geo <- geo %>% unnest()
+
+geo %>% write_rds("gp_lat_lon.rds")
+
+
+```
+
+
+```{r fig.height=8, fig.width=12}
+
+geo1 <- read_rds("gp_lat_lon.rds") %>% unnest() %>% select(OrgId, Name, lat, lon)
+
+gp_clus_a <- gp_clus[, 1:61] %>%
+  left_join(geo1, by = c("AreaCode" = "OrgId"))
+
+read_
+
+
+p <- ggmap(get_googlemap("London", zoom = 10))
+
+p + geom_point(aes(x = lon, y = lat, colour = factor(cluster)), size = 1.6, data = gp_clus_a, show.legend = TRUE )+
+  theme_minimal() +
+  viridis::scale_colour_viridis( discrete = TRUE, option = "C") +
+  ggsave("london_gps.png", scale = 2)
+
+q <-  ggmap(get_googlemap("England", zoom = 6))
+
+
+q + geom_point(aes(x = lon, y = lat, color = factor(cluster)), size = .4, data = gp_clus_a, show.legend = TRUE )+
+  theme_minimal() +
+  viridis::scale_colour_viridis(discrete = TRUE, option = "C", name = "Cluster") +
+  facet_wrap(~cluster, nrow = 2)
+
+
+```
+
+
+## Cluster descriptions
+
+Cluster No | Size | Description | Geography
+-----------|------|-------------|----------
+1 | `r nrow(gp_clus_a[gp_clus_a$cluster == 1, ])` | Relatively deprived, "middle-aged", higher levels of obesity and smoking, high prevalence of diabetes in younger age groups, high prevalence of cvd, msk, epilepsy, respiratory disease) | Urban NE/ NW/ Midlands/ some coastal/ East London
+2 | `r nrow(gp_clus_a[gp_clus_a$cluster == 2, ])` | Most deprived, "middle-aged", highest levels of obesity and smoking, high prevalence of diabetes in younger age groups, high prevalence of mental health problems and respiratory disease | Similar to cluster 1: Urban NE/ NW/ Midlands/ some coastal/ East London
+3 | `r nrow(gp_clus_a[gp_clus_a$cluster == 3, ])` | Average - "middle age structure", not deprived, average levels of obesity, smoking, average prevalence for most disease | Suburban NE/ NW/ Midlands/ some coastal/London/ South coast
+4 | `r nrow(gp_clus_a[gp_clus_a$cluster == 4, ])` | Relatively deprived, most "middle-aged", low levels of obesity but higher smoking rates, high prevalence of diabetes in younger age groups, low prevalence of cvd, msk, epilepsy, respiratory disease), higher levels of mental health problems | Mostly suburban London
+5 | `r nrow(gp_clus_a[gp_clus_a$cluster == 5, ])` | Deprived, youngest population, higher levels of obesity and smoking, high prevalence of diabetes in younger age groups, high prevalence of cvd, msk, epilepsy, respiratory disease) | Similar to cluster 4
+6 | `r nrow(gp_clus_a[gp_clus_a$cluster == 6, ])` | Not deprived, oldest population, lower levels of obesity and smoking, high prevalence of diabetes in younger age groups, high prevalence of cvd, msk, epilepsy, respiratory disease) | Largely coastal areas across England
+7 | `r nrow(gp_clus_a[gp_clus_a$cluster == 7, ])` | Similar to 5.Deprived, youngest population, higher levels of obesity and smoking, high prevalence of diabetes in younger age groups, high prevalence of cvd, msk, epilepsy, respiratory disease | Geography similar to 1
+8 | `r nrow(gp_clus_a[gp_clus_a$cluster == 8, ])` | Similar to 4 but less deprived, more middle-aged population, lower levels of obesity and smoking, high prevalence of diabetes in older age groups, lower prevalence of cvd, msk, epilepsy, respiratory disease | Largely central London
+9 | `r nrow(gp_clus_a[gp_clus_a$cluster == 9, ])` | Similar to 6. Not Deprived, older population, lower levels of obesity but higher rate of smoking, high prevalence of diabetes in younger age groups, high prevalence of cvd, msk, epilepsy, respiratory disease | Geography widespread across the country
+10 | `r nrow(gp_clus_a[gp_clus_a$cluster == 10, ])` | Not deprived, younger population, low rates of risk factors and prevalence across range of diseases | South East England
+
+## Conclusions
+
+* Through simple clustering approaches we have been able define a number of distinct GP population phenotypes. For the purposes of this analysis we use *co-morbidity* to mean the co-existence of high prevalence across a range of 
+diseases in the same population. Using this definition we can distinguish 4 groups of practice populations with high levels of *co-morbidity*:
+
+* **Cluster 1** which is deprived, with high rates of smoking and obesity and is geographically concentrated in urban NE, NW and West Midlands, and East London
+* **Cluster 2** which is similar to **Cluster 1** but more deprived, with high rates of smoking and obesity and is geographically concentrated in urban NE, NW and West Midlands, and East London. The main difference from **Cluster 1** is higher rates of mental health disorders, and lower rates of CVD
+* **Cluster 6** which consists of largely coastal, older, non-deprived populations
+* **Cluster 9** which is similar to **Cluster 6** but has a different geography
+
+* Note that we have used crude prevalence estimates from QOF - age adjusted estimates could change the clustering. Also we could improve demographic profiling by including ethnicity estimates. Additional risk factor estimates (e.g. alcohol) could also change the clustering. The choice of 10 cluster groups is somewhat arbitrary and it is clear that some are subsets of others.
+
+* From an inequality perspective **Cluster 1** is of most concern which appears to have high levels of co-morbidity despite having a relatively young population profile
+
+* London has a different set of phenotypes to the rest of the country.
+
+
+## Next steps
+
+1. This analysis identifies two kinds of practice groups with high levels of co-morbidity - one identified by virtue of its older age profile, and another by virtue of its levels of deprivation and risk factors. There are sub-clusters  these groups with different geographical profiles. These practices are identifiable and may require different approaches to tackling co-morbidity or marketing initiatives to local populations.
+2. This is only a preliminary analysis  - more variables could be included which could add additional insight
+3. Diseases and risk factors tend to cluster in populations - for example mental health issues in **Cluster 2**
+4. Can estimate approximate sizes of co-comorbid populations from practize size, QOF numerators and denominators
+4. We can use this information to cluster practices within large primary care datasets like CPRD where practices are anonymised, to try and train better prevalence models, define and refine practice population phenotypes
+5. The analysis could be further refined, and clustering over time could be assessed
+6. This could help in refining interventions to tackle inequality or specific populations
+
+
+## Annex
+
+### Search term
+
+("unsupervised machine learning"[MeSH Terms] OR ("unsupervised"[All Fields] AND "machine"[All Fields] AND "learning"[All Fields]) OR "unsupervised machine learning"[All Fields]) OR (("cluster analysis"[MeSH Terms] OR ("cluster"[All Fields] AND "analysis"[All Fields]) OR "cluster analysis"[All Fields]) AND ("population"[MeSH Terms] OR "population"[All Fields] OR "population groups"[MeSH Terms] OR ("population"[All Fields] AND "groups"[All Fields]) OR "population groups"[All Fields]) AND segmentation[All Fields]) AND 2010[PDAT] : 2018[PDAT]
+
+`r read_lines("prec_med.txt") %>% str_remove(., "\\t") %>% str_replace_all(., "\\.,", "\\n")`
