@@ -3,10 +3,10 @@
 # thanks to Chris Mainey for his explainer on dbs in r
 
 
-#install.packages(c('DBI', 'dbplyr', 'RSQLite', 'NHSRdatasets'))
+#install.packages(c('DBI', 'odbc', 'dbplyr', 'RSQLite', 'NHSRdatasets'))
 
 library(easypackages)
-libraries(c("readxl", "readr", "plyr", "dplyr", 'dbplyr', 'png', 'tidyverse', 'scales', 'zoo', 'stats', 'epitools', 'DBI', 'NHSRdatasets', 'RSQLite'))
+libraries(c("readxl", "readr", "plyr", "dplyr", 'dbplyr', 'png', 'tidyverse', 'scales', 'zoo', 'stats', 'epitools', 'DBI', 'NHSRdatasets', 'RSQLite', 'odbc'))
 
 # load A&E data from NHSRdatasets
 data('ae_attendances')
@@ -49,15 +49,25 @@ ae <- tbl(con, 'ae_attendances')
 ae %>% 
   glimpse()
 
+
+org_code_x <- ae %>% 
+  select(org_code, attendances) %>% 
+  filter(attendances < 500) %>% 
+  collect() %>% 
+  select(org_code) %>% 
+  unique() %>% 
+  as.character()
+
 ae %>% 
   select(org_code, attendances) %>% 
   view()
 
 # use dplyr verbs to create the same query
 ae %>% 
-  filter(org_code == 'RRK') %>% 
+  filter(org_code %in% org_code_x) %>% 
   group_by(type) %>% 
-  summarise(Count = n()) 
+  show_query()
+
 
 # return the SQL query that your dplyr verbs are running
 ae %>% 
