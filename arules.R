@@ -1,7 +1,8 @@
 # Association rules - arules package R
 library(easypackages)
 
-libraries("readxl", "readr", "plyr", "dplyr", "ggplot2", "png", "tidyverse", "reshape2", "scales", 'zoo', 'stats','arules', 'arulesViz')
+libraries("readxl", "readr", "plyr", "dplyr", "ggplot2", "png", "tidyverse", "reshape2", "scales", 'zoo', 'stats','arules')
+
 
 #data("Groceries")
 #head(Groceries)
@@ -112,6 +113,7 @@ rules.one.lift <- sort (rules.one.feature, by = "lift",
 inspect(rules.one.lift) %>% 
   view()
 
+
 # You can see from this that Child has a .068 Support and .54 confidence and a lift value of 1.4.
 
 # Support is how often Child appears in the dataset
@@ -149,29 +151,17 @@ rules.three.lift <- sort(rules.three.features, by = "lift", decreasing = TRUE)
 
 inspect(head(rules.three.lift, n = 10))
 
-# Does adding greater number of items in sets make a difference?
-rules.five.features <- apriori(data = titanic.trans, 
-                                parameter = list(supp = 0.05, 
-                                                 conf = 0.1, 
-                                                 minlen = 2, 
-                                                 maxlen = 6), # This time we have included max length of six, that is up to five items in the LHS set plus the Survived item in the RHS set 
-                                appearance = list(default ="lhs", 
-                                                  rhs = "Survived"), 
-                                control = list(verbose = FALSE))
+# Adult females traveling in first class account for 7.63% of Titanic passengers. These passengers survived at a rate of 97.14%. If you were lucky enough to be a first class adult female passenger you were 2.53 times more likely to survive that a random passenger on the Titanic.
 
-rules.five.lift <- sort(rules.three.features, by = "lift", decreasing = TRUE)
-
-inspect(head(rules.five.lift, n = 200)) %>% 
-  view()
 
 # Take constraint off
-rules.features <- apriori(data = titanic.trans, 
-                               parameter = list(supp = 0.05, 
-                                                conf = 0.1, 
-                                                minlen = 2, 
-                                                maxlen = 6), # This time we have included max length of six, that is up to five items in the LHS set plus the Survived item in the RHS set 
+rules.features <- apriori(data = titanic.trans,
+                               parameter = list(supp = 0.05,
+                                                conf = 0.1,
+                                                minlen = 2,
+                                                maxlen = 6), # This time we have included max length of six, that is up to five items in the LHS set plus the Survived item in the RHS set
                                control = list(verbose = FALSE))
 
-rules.lift <- sort(rules.features, by = "lift", decreasing = TRUE)
-
-inspect(head(rules.lift, n = 10))
+# rules.lift <- sort(rules.features, by = "lift", decreasing = TRUE)
+# 
+# inspect(head(rules.lift, n = 10))
